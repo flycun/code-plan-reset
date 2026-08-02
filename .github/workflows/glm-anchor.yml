@@ -1,25 +1,10 @@
-# .github/workflows/glm-anchor.yml
-# 目标:每天凌晨锚定一次 GLM Code Plan 窗口,把"重置点"钉在上午工作时段。
-# 机制:窗口 = 该窗口首次套餐消耗 + 5h,到期后下次消耗启动新窗口。
-#       所以 锚定时刻 → 决定 重置点 = 锚定时刻 + 5h。
-# 默认:锚定 北京06:07 → 重置点 ~11:07 → 上午 10:00-12:00 连续用满两个窗口。
-#
-# 注意:Code Plan 套餐额度只认"官方编程工具发起的调用",
-#       所以这里跑 Claude Code(headless),而不是直接 curl/fetch API。
-
-name: GLM Code Plan 窗口锚定
+name: glm-anchor
 
 on:
   schedule:
-    # ⚠️ GitHub Actions 的 cron 是 UTC!北京 = UTC+8。
-    # 北京 06:07 = UTC 22:07(前一天) → 重置点 ≈ 北京 11:07。
-    # 想改重置点: 锚定(北京) = 重置点 - 5h ; cron(UTC) = 锚定(北京) - 8h。
-    #   重置09:00→锚04:00→"7 20 * * *" | 重置10:00→锚05:00→"7 21 * * *" | 重置11:00→锚06:00→"7 22 * * *"(默认)
-    # 用 07 分而非 00 分,避开整点拥堵、减小触发延迟。
     - cron: "7 22 * * *"
-  workflow_dispatch: # 手动触发,首次部署后用它验证整条链路
+  workflow_dispatch:
 
-# 同一时刻只跑一个,避免重复消耗
 concurrency:
   group: glm-anchor
   cancel-in-progress: false
@@ -29,37 +14,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: 打印触发时间(方便事后核对窗口边界)
+      - name: print-time
         run: |
-          echo "UTC : $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "北京: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
+          echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "BJ : $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: 安装 Claude Code
+      - name: install-claude-code
         run: npm install -g @anthropic-ai/claude-code
 
-      # CI 里 headless 跑,需跳过 Claude Code 的 onboarding/登录交互,否则会卡住
-      - name: 跳过 onboarding
+      - name: skip-onboarding
         run: |
           mkdir -p ~/.claude
-          echo '{"hasCompletedOnboarding": true}' > ~/.claude.json
+          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
 
-      # 套餐 KEY 全程只从 Secrets 注入,代码与日志里永不出现明文
-      - name: 锚定调用(经 Claude Code 发起 → 走 Code Plan 套餐额度)
+      - name: anchor-call
         env:
-          # 智谱开放平台(国内 bigmodel.cn)的 anthropic 协议端点,Claude Code 专用;
-          # 注意:勿用海外 api.z.ai,也别用通用 /api/paas/v4(那是按量付费端点)
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
-          # 模型名以智谱 Claude Code 接入指南为准;GLM_MODEL 可在仓库 Variables 里改
           ANTHROPIC_MODEL: ${{ vars.GLM_MODEL || 'glm-4.6' }}
-          # 防止 Claude Code 调用默认小模型(否则会请求 Anthropic 官方失败)
           ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.GLM_MODEL || 'glm-4.6' }}
           DISABLE_TELEMETRY: "1"
         run: |
-          # headless 模式;prompt 用仓库 Variable ANCHOR_PROMPT,默认 "ping"(最小消耗,只为锚定窗口)
-          # 若想让锚定顺便干点活,在仓库 Variables 设 ANCHOR_PROMPT 即可。
           claude -p "${{ vars.ANCHOR_PROMPT || 'ping' }}" --model "$ANTHROPIC_MODEL"
