@@ -19,9 +19,9 @@ jobs:
           echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "BJ : $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - name: install-claude-code
         run: npm install -g @anthropic-ai/claude-code
