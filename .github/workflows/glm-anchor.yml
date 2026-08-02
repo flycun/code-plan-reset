@@ -48,10 +48,11 @@ jobs:
           echo "bytes:"; wc -c < email-body.html
 
       - name: send-mail
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v18
         with:
-          server: smtp.163.com
-          port: 465
+          server_address: smtp.163.com
+          server_port: 465
+          secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           from: "GitHub Trending <${{ secrets.MAIL_USERNAME }}>"
