@@ -50,6 +50,28 @@
 
 > ⚠️ 智谱国内开放平台是 `open.bigmodel.cn`，海外 z.ai 是 `api.z.ai`，两者 key/端点不通用，别混用。
 
+## 每日任务：GitHub Trending 邮件
+
+锚定调用不只是 `ping`——它每天会抓取 **GitHub 每日热门仓库 Top 10**，整理成 HTML 邮件发到你的 163 邮箱。
+（任务 prompt 在 `.github/prompts/trending.txt`，可自由修改；任务 prompt 用中文随便写，不受 workflow 注册限制。）
+
+### 额外要加的 Secrets
+
+| Secret 名 | 值 |
+|-----------|-----|
+| `MAIL_USERNAME` | 发件 163 邮箱地址（如 `xxx@163.com`） |
+| `MAIL_PASSWORD` | 163 邮箱 **SMTP 授权码**（不是登录密码！） |
+| `MAIL_TO` | 收件邮箱（可填同一个 163 邮箱） |
+
+### 获取 163 邮箱 SMTP 授权码
+
+1. 登录 163 邮箱 → **设置 → POP3/SMTP/IMAP**
+2. **开启**「SMTP 服务」（按提示完成短信验证）
+3. 得到一串 **16 位授权码** → 这就是 `MAIL_PASSWORD`
+4. 服务器 `smtp.163.com`、端口 `465`（已在 workflow 写死）
+
+> 换 QQ 邮箱：把 workflow 里 `server` 改成 `smtp.qq.com`，授权码在 QQ 邮箱「设置 → 账户 → POP3/SMTP」开启时获取，其余不变。
+
 ## 验证（关键，别跳过）
 
 手动触发后看两处：
