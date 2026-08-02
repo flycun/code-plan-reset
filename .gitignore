@@ -1,0 +1,11 @@
+# Claude Code 本地设置(含本地权限配置,勿提交)
+.claude/
+
+# 敏感信息(防止误提交 key/密钥)
+.env
+.env.*
+!.env.example
+*.local
+secrets.*
+*.key
+*.pem
