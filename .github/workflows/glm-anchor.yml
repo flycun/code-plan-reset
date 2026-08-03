@@ -2,7 +2,10 @@ name: glm-anchor
 
 on:
   schedule:
-    - cron: "7 22 * * *"
+    # Fire EARLY at UTC 21:07 (Beijing 05:07), then the wait step below holds
+    # until Beijing 06:00 sharp. Anchor time is fixed at 06:00 -> reset at 11:00,
+    # immune to GitHub Actions cron latency (which can drift tens of minutes).
+    - cron: "7 21 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -12,15 +15,23 @@ concurrency:
 jobs:
   anchor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
-      - name: print-time
+      - name: wait-until-anchor
         run: |
-          echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "BJ : $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
+          # Hold until Beijing 06:00 (UTC 22:00) regardless of when cron actually fired.
+          now=$(date -u +%s)
+          target=$(date -u -d 'today 22:00:00' +%s)
+          if [ "$now" -lt "$target" ]; then
+            echo "Waiting ~$(( (target-now)/60 )) min until Beijing 06:00..."
+            sleep $((target-now))
+          else
+            echo "Past Beijing 06:00 (cron fired late), run now."
+          fi
           echo "BJ_DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_ENV"
+          echo "Anchor time (Beijing): $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
       - uses: actions/setup-node@v5
         with:
