@@ -2,10 +2,10 @@ name: glm-anchor
 
 on:
   schedule:
-    # Fire EARLY at UTC 21:07 (Beijing 05:07), then the wait step below holds
-    # until Beijing 06:00 sharp. Anchor time is fixed at 06:00 -> reset at 11:00,
-    # immune to GitHub Actions cron latency (which can drift tens of minutes).
-    - cron: "7 21 * * *"
+    # Fire EARLY at UTC 20:07 (Beijing 04:07), then the wait step below holds
+    # until Beijing 06:00 sharp. Anchor fixed at 06:00 -> reset at 11:00.
+    # 2h buffer absorbs GitHub cron latency (observed 54min drift on 2026-08-03).
+    - cron: "7 20 * * *"
   workflow_dispatch:
 
 concurrency:
