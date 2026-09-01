@@ -22,13 +22,17 @@ jobs:
       - name: wait-until-anchor
         run: |
           # Hold until Beijing 06:00 (UTC 22:00) regardless of when cron actually fired.
+          # Cron is 21:07 UTC, so a legitimate wait is always < 1h. If cron fired so
+          # late that the UTC date rolled over, "today 22:00" points to the wrong
+          # day (diff ~21h) — run immediately instead of sleeping until timeout.
           now=$(date -u +%s)
           target=$(date -u -d 'today 22:00:00' +%s)
-          if [ "$now" -lt "$target" ]; then
-            echo "Waiting ~$(( (target-now)/60 )) min until Beijing 06:00..."
-            sleep $((target-now))
+          diff=$((target - now))
+          if [ "$diff" -gt 0 ] && [ "$diff" -le 3600 ]; then
+            echo "Waiting ~$(( diff/60 )) min until Beijing 06:00..."
+            sleep "$diff"
           else
-            echo "Past Beijing 06:00 (cron fired late), run now."
+            echo "Past anchor or abnormal gap (diff=${diff}s), run now."
           fi
           echo "BJ_DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_ENV"
           echo "Anchor time (Beijing): $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
