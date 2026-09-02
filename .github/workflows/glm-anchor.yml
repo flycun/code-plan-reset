@@ -2,10 +2,11 @@ name: glm-anchor
 
 on:
   schedule:
-    # Fire EARLY at UTC 21:07 (Beijing 05:07), then the wait step below holds
+    # Fire EARLY at UTC 20:00 (Beijing 04:00), then the wait step below holds
     # until Beijing 06:00 sharp. Anchor fixed at 06:00 -> reset at 11:00.
-    # 1h buffer: balances cron latency vs private-repo usage (2000 min/mo).
-    - cron: "7 21 * * *"
+    # 2h buffer: cron latency can reach ~2h; public repo = free minutes, so
+    # waiting is cost-free.
+    - cron: "0 20 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -15,20 +16,20 @@ concurrency:
 jobs:
   anchor:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
 
       - name: wait-until-anchor
         run: |
           # Hold until Beijing 06:00 (UTC 22:00) regardless of when cron actually fired.
-          # Cron is 21:07 UTC, so a legitimate wait is always < 1h. If cron fired so
+          # Cron is 20:00 UTC, so a legitimate wait is always < 2h. If cron fired so
           # late that the UTC date rolled over, "today 22:00" points to the wrong
           # day (diff ~21h) — run immediately instead of sleeping until timeout.
           now=$(date -u +%s)
           target=$(date -u -d 'today 22:00:00' +%s)
           diff=$((target - now))
-          if [ "$diff" -gt 0 ] && [ "$diff" -le 3600 ]; then
+          if [ "$diff" -gt 0 ] && [ "$diff" -le 7200 ]; then
             echo "Waiting ~$(( diff/60 )) min until Beijing 06:00..."
             sleep "$diff"
           else
