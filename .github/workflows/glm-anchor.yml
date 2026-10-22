@@ -114,9 +114,10 @@ jobs:
 
       - name: anchor-ping
         env:
-          # International: https://api.minimax.io/anthropic
-          # China:         https://api.minimaxi.com/anthropic
-          ANTHROPIC_BASE_URL: ${{ vars.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic' }}
+          # M Plan (platform.minimax.cn subscription): https://api.minimax.cn/anthropic
+          # International (platform.minimax.io):        https://api.minimax.io/anthropic
+          # Keys are NOT interchangeable between the two platforms.
+          ANTHROPIC_BASE_URL: ${{ vars.MINIMAX_BASE_URL || 'https://api.minimax.cn/anthropic' }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.MINIMAX_MODEL || 'MiniMax-M3.1-Flash' }}
           ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.MINIMAX_MODEL || 'MiniMax-M3.1-Flash' }}

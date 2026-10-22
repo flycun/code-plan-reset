@@ -56,12 +56,13 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 
 | 名称 | 类型 | 值 |
 |------|------|-----|
-| `MINIMAX_API_KEY` | Secret | MiniMax 平台 API Key（Coding Plan 绑定的那个） |
-| `MINIMAX_BASE_URL` | Variable（可选） | 默认 `https://api.minimax.io/anthropic`（国际站）；国内站填 `https://api.minimaxi.com/anthropic` |
-| `MINIMAX_MODEL` | Variable（可选） | 默认 `MiniMax-M3.1-Flash`（也可 `MiniMax-M3`） |
+| `MINIMAX_API_KEY` | Secret | M Plan 订阅 Key（`platform.minimax.cn/console/plan` 获取） |
+| `MINIMAX_BASE_URL` | Variable（可选） | 默认 `https://api.minimax.cn/anthropic`（M Plan 国内站）；国际站用户才改 `https://api.minimax.io/anthropic` |
+| `MINIMAX_MODEL` | Variable（可选） | 默认 `MiniMax-M3.1-Flash`（需声明 1M 上下文时用 `MiniMax-M3.1-Flash[1m]`） |
 
-> MiniMax 端点已对照官方 Anthropic 兼容文档：认证走 `Authorization: Bearer`，正好对应
-> Claude Code 的 `ANTHROPIC_AUTH_TOKEN`，与 GLM 用法一致。
+> M Plan 接入参数已对照官方文档（platform.minimax.cn/docs/m-plan/claude-code）：认证走
+> `Authorization: Bearer`，正好对应 Claude Code 的 `ANTHROPIC_AUTH_TOKEN`，与 GLM 用法一致。
+> ⚠️ 国内 M Plan（`api.minimax.cn`）与国际站（`api.minimax.io`）key 不通用，别混用。
 
 ### 与 GLM job 的差异
 
@@ -76,7 +77,7 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 1. **新建公开仓库**（public 时 Actions 分钟免费；secrets 不会随代码泄露，安全无虞），把本目录推上去。
 2. 仓库 **Settings → Secrets and variables → Actions → Secrets**，新增：
    - `ZAI_API_KEY` = 你的 Code Plan 套餐 key
-   - `MINIMAX_API_KEY` = 你的 MiniMax Coding Plan key（不用 MiniMax 可不加）
+   - `MINIMAX_API_KEY` = 你的 M Plan 订阅 Key（`platform.minimax.cn/console/plan` 获取；不用 MiniMax 可不加）
 3. （可选）同一页 **Variables** 里加：
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
 4. 推送 `.github/workflows/glm-anchor.yml`，自动按 cron 运行。
@@ -93,13 +94,15 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 
 > ⚠️ 智谱国内开放平台是 `open.bigmodel.cn`，海外 z.ai 是 `api.z.ai`，两者 key/端点不通用，别混用。
 
-MiniMax 侧对应配置（已对照官方文档）：
+MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 | 配置项 | 值 |
 |--------|-----|
-| Base URL | `https://api.minimax.io/anthropic`（国际站）/ `https://api.minimaxi.com/anthropic`（国内站） |
-| 认证 | 环境变量 `ANTHROPIC_AUTH_TOKEN` = MiniMax API Key |
-| 模型名 | `MiniMax-M3.1-Flash`（或 `MiniMax-M3`） |
+| Base URL | `https://api.minimax.cn/anthropic`（M Plan 国内站，默认）/ `https://api.minimax.io/anthropic`（国际站） |
+| 认证 | 环境变量 `ANTHROPIC_AUTH_TOKEN` = M Plan 订阅 Key |
+| 模型名 | `MiniMax-M3.1-Flash`（Go/Explore/Build 三档均可用；1M 上下文用 `MiniMax-M3.1-Flash[1m]`） |
+
+> ⚠️ 国内 M Plan 是 `api.minimax.cn`，国际站是 `api.minimax.io`，两者 key/端点不通用，别混用。
 
 ## 每日任务：GitHub Trending 邮件
 
