@@ -41,11 +41,42 @@ GitHub Actions 的 cron 高峰期可延迟几分钟到几小时。为保证锚�
 **上午可连续满负荷用 2 小时（10:00–12:00）。** 12 点后到 16:00 断档——这是 5h 间隔的硬上限，
 上午最多跨 2 个窗口，用不上第 3 个。
 
+## MiniMax 窗口锚定（与 GLM 同一时刻）
+
+同一 workflow 里有第二个 job `anchor-minimax`，**与 GLM 用同一个 cron、同样的“提前触发 + 睡到
+北京 06:00”等待逻辑**，在完全相同的时刻向 MiniMax 的 Anthropic 兼容端点发一次最小调用（`ping`），
+把 MiniMax Coding Plan 的 5h 窗口也钉在 06:00 → 11:00 重置。两个套餐、四个窗口：
+
+```
+GLM     窗口A 06:00–11:00 │ 窗口B 11:00–16:00
+MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
+```
+
+### 额外要加的 Secrets / Variables
+
+| 名称 | 类型 | 值 |
+|------|------|-----|
+| `MINIMAX_API_KEY` | Secret | MiniMax 平台 API Key（Coding Plan 绑定的那个） |
+| `MINIMAX_BASE_URL` | Variable（可选） | 默认 `https://api.minimax.io/anthropic`（国际站）；国内站填 `https://api.minimaxi.com/anthropic` |
+| `MINIMAX_MODEL` | Variable（可选） | 默认 `MiniMax-M3.1-Flash`（也可 `MiniMax-M3`） |
+
+> MiniMax 端点已对照官方 Anthropic 兼容文档：认证走 `Authorization: Bearer`，正好对应
+> Claude Code 的 `ANTHROPIC_AUTH_TOKEN`，与 GLM 用法一致。
+
+### 与 GLM job 的差异
+
+- MiniMax job 只发最小 `ping` 调用（目的只是消耗一次额度锚定窗口），**不发 Trending 邮件**；
+  想让 MiniMax 也跑 Trending 任务的话，把 `anchor-ping` 步骤的 prompt 换成
+  `$(cat .github/prompts/trending.txt)` 并仿照 GLM job 加 send-mail 步骤即可。
+- 验证方式同 GLM：手动触发后看 Actions 日志是否正常返回 `ok`，再到 MiniMax 控制台
+  确认用量扣减、窗口重置时间 ≈ 锚定 + 5h。
+
 ## 部署（5 步）
 
 1. **新建公开仓库**（public 时 Actions 分钟免费；secrets 不会随代码泄露，安全无虞），把本目录推上去。
 2. 仓库 **Settings → Secrets and variables → Actions → Secrets**，新增：
    - `ZAI_API_KEY` = 你的 Code Plan 套餐 key
+   - `MINIMAX_API_KEY` = 你的 MiniMax Coding Plan key（不用 MiniMax 可不加）
 3. （可选）同一页 **Variables** 里加：
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
 4. 推送 `.github/workflows/glm-anchor.yml`，自动按 cron 运行。
@@ -61,6 +92,14 @@ GitHub Actions 的 cron 高峰期可延迟几分钟到几小时。为保证锚�
 | OpenAI 协议端点（备用） | `https://open.bigmodel.cn/api/coding/paas/v4` |
 
 > ⚠️ 智谱国内开放平台是 `open.bigmodel.cn`，海外 z.ai 是 `api.z.ai`，两者 key/端点不通用，别混用。
+
+MiniMax 侧对应配置（已对照官方文档）：
+
+| 配置项 | 值 |
+|--------|-----|
+| Base URL | `https://api.minimax.io/anthropic`（国际站）/ `https://api.minimaxi.com/anthropic`（国内站） |
+| 认证 | 环境变量 `ANTHROPIC_AUTH_TOKEN` = MiniMax API Key |
+| 模型名 | `MiniMax-M3.1-Flash`（或 `MiniMax-M3`） |
 
 ## 每日任务：GitHub Trending 邮件
 

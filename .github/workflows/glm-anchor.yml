@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: glm-anchor
+  group: code-plan-anchor
   cancel-in-progress: false
 
 jobs:
@@ -75,3 +75,54 @@ jobs:
           to: ${{ secrets.MAIL_TO }}
           subject: GitHub Trending Daily Top 10 - ${{ env.BJ_DATE }}
           html_body: file://email-body.html
+
+  # Anchor the MiniMax Coding Plan 5h window at the SAME moment (Beijing 06:00):
+  # identical cron + identical wait-until-anchor step, then one minimal `claude -p`
+  # call via MiniMax's Anthropic-compatible endpoint.
+  anchor-minimax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    concurrency:
+      group: anchor-minimax
+      cancel-in-progress: false
+    steps:
+      - name: wait-until-anchor
+        run: |
+          # Same anchor as the GLM job: hold until Beijing 06:00 (UTC 22:00).
+          now=$(date -u +%s)
+          target=$(date -u -d 'today 22:00:00' +%s)
+          diff=$((target - now))
+          if [ "$diff" -gt 0 ] && [ "$diff" -le 7200 ]; then
+            echo "Waiting ~$(( diff/60 )) min until Beijing 06:00..."
+            sleep "$diff"
+          else
+            echo "Past anchor or abnormal gap (diff=${diff}s), run now."
+          fi
+          echo "Anchor time (Beijing): $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: install-claude-code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: skip-onboarding
+        run: |
+          mkdir -p ~/.claude
+          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
+
+      - name: anchor-ping
+        env:
+          # International: https://api.minimax.io/anthropic
+          # China:         https://api.minimaxi.com/anthropic
+          ANTHROPIC_BASE_URL: ${{ vars.MINIMAX_BASE_URL || 'https://api.minimax.io/anthropic' }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.MINIMAX_MODEL || 'MiniMax-M3.1-Flash' }}
+          ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.MINIMAX_MODEL || 'MiniMax-M3.1-Flash' }}
+          DISABLE_TELEMETRY: "1"
+        run: |
+          claude -p "Reply with exactly: ok" \
+            --dangerously-skip-permissions \
+            --output-format text
+          echo "MiniMax anchor call done at $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
