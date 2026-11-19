@@ -1,5 +1,7 @@
 name = "code-plan-anchor-dispatch"
 main = "src/index.js"
+workers_dev = false   # 本 Worker 只响应定时事件，关掉多余的 workers.dev 公开 URL
+preview_urls = false   # 同理，关掉 Preview URL
 compatibility_date = "2026-11-01"
 
 # UTC 21:30 daily (Beijing 05:30): fire the GitHub workflow_dispatch 30 min
