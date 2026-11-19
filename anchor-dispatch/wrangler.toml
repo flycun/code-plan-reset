@@ -1,0 +1,9 @@
+name = "code-plan-anchor-dispatch"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# UTC 21:30 daily (Beijing 05:30): fire the GitHub workflow_dispatch 30 min
+# before the UTC 22:00 anchor. The workflow itself sleeps to the exact minute.
+# Cloudflare cron triggers normally fire within seconds of the schedule.
+[triggers]
+crons = ["30 21 * * *"]

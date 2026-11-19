@@ -18,17 +18,17 @@
                          上午 10-11 用 A，11-12 用 B
 ```
 
-### 锚定精度：cron 提前触发 + 睡到整点
+### 锚定精度：双保险触发 + 睡到整点
 
-GitHub Actions 的 cron 高峰期可延迟几分钟到几小时。为保证锚定时刻精确，workflow
-在 UTC 20:00（北京 04:00）提前触发，job 内 `wait-until-anchor` 步骤睡到 UTC 22:00 整
+GitHub Actions 的 cron 是「尽力而为」：官方文档明说高负载（尤其整点）会延迟甚至丢任务，实测延迟 3~7 小时。为保证锚定时刻精确，workflow
+采用**双保险触发**，job 内 `wait-until-anchor` 步骤一律睡到 UTC 22:00 整
 （北京 06:00）再发起 `claude -p`：
 
-- 触发延迟 < 2 小时 → 锚定分毫不差落在 06:00，重置点 = 11:00
-- 触发更晚 → 已过锚定点，立即补跑（重置点随实际触发时刻漂移）
-- 触发晚到跨过 UTC 午夜 → 同样立即补跑（等待时长上限 2h，超过视为异常立即执行）
+- **主时钟**：Cloudflare Worker（`anchor-dispatch/`）在 UTC 21:30（北京 05:30）调用 `workflow_dispatch`，run 秒级启动
+- **兜底**：GitHub cron 在 UTC 16:17 提前触发——刻意避开整点高峰 + ~5h45m 提前量；后到的触发会取消仍在睡眠的前一个 run（`cancel-in-progress: true`），每天只有一个 run 真正锚定
+- 启动晚于 22:00 → 已过锚定点，立即补跑（重置点随漂移）；晚到跨过 UTC 午夜 → 同样立即补跑（等待上限 6h，超过视为异常立即执行）
 
-> 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费，可放心用 2h 提前量
+> 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费，可放心用 ~5h45m 提前量
 > 扛 cron 延迟。若改回私有，需在「扛延迟」和「烧分钟数」（2000 min/月）之间取舍。
 
 ## 上午能用多久（重置点 = 11:00 时）
@@ -81,7 +81,14 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 3. （可选）同一页 **Variables** 里加：
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
 4. 推送 `.github/workflows/glm-anchor.yml`，自动按 cron 运行。
-5. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch）手动跑一次验证。
+5. **部署 Cloudflare 主时钟**（治本，推荐）：在 [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) 创建 fine-grained PAT（仅本仓库，权限 Actions: Read and write），然后：
+   ```bash
+   cd anchor-dispatch
+   npx wrangler login
+   npx wrangler secret put GH_PAT   # 粘贴上一步的 PAT
+   npx wrangler deploy
+   ```
+6. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch）手动跑一次验证。
 
 ## 关键配置（已对照智谱官方文档）
 
@@ -138,19 +145,19 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 ## 调整重置点
 
-公式：`锚定(北京) = 想要的重置点 − 5h`；`cron(UTC) = 锚定时刻(UTC) − 提前约 2h`。
+公式：`锚定(北京) = 想要的重置点 − 5h`；`cron(UTC) = 锚定时刻(UTC) − 约 5h45m`（Worker cron = 锚点 − 30min）。
 
 改锚定点要改 workflow 里**两处**：
-1. `on.schedule.cron`（提前约 2 小时触发）
+1. `on.schedule.cron`（提前约 5h45m 触发）和 `anchor-dispatch/wrangler.toml` 的 Worker cron
 2. `wait-until-anchor` 里的 `today 22:00:00`（UTC 锚定整点，睡到此刻再执行）
 
-| 想要的重置点 | 锚定(北京) | cron (UTC) | wait 睡到 (UTC) | 上午可用时段 |
-|:---:|:---:|:---:|:---:|:---:|
-| 09:00 | 04:00 | `0 18 * * *` | 20:00 | 08:00–10:00 |
-| 10:00 | 05:00 | `0 19 * * *` | 21:00 | 09:00–11:00 |
-| **11:00**（默认） | **06:00** | **`0 20 * * *`** | **22:00** | **10:00–12:00** |
+| 想要的重置点 | 锚定(北京) | cron (UTC) | Worker cron (UTC) | wait 睡到 (UTC) | 上午可用时段 |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 09:00 | 04:00 | `17 14 * * *` | `30 19 * * *` | 20:00 | 08:00–10:00 |
+| 10:00 | 05:00 | `17 15 * * *` | `30 20 * * *` | 21:00 | 09:00–11:00 |
+| **11:00**（默认） | **06:00** | **`17 16 * * *`** | **`30 21 * * *`** | **22:00** | **10:00–12:00** |
 
-> 提前量约 2 小时：扛住 GitHub Actions 高峰期的 cron 延迟（实测可达 2h+）。public 仓库分钟免费，
+> 提前量约 5h45m：扛住 GitHub Actions 高峰期的 cron 延迟（实测 3~7h，避整点后大幅缓解）。public 仓库分钟免费，
 > 等待不计费；若为私有仓库需权衡 2000 min/月额度。
 > 「上午可用时段」= 重置点前后各约 1 小时（两个窗口各撑约 1h）。
 
@@ -158,12 +165,13 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 - **重置点漂移 / 没钉住**：多半是前一天用到太晚，前一个窗口越过锚定点。
   保证前一天 24:00 前停用即可（正常作息天然满足）。
-- **GitHub Actions 触发延迟**：高峰期 cron 可能晚几分钟到几小时。延迟 < 2 小时时锚定不受影响
+- **GitHub Actions 触发延迟**：高峰期 cron 可能晚几分钟到几小时。延迟 < ~5h45m 时锚定不受影响
   （wait 步骤睡到整点）；更晚则立即补跑，重置点随实际触发时刻漂移，属正常。
 - **run 卡在 wait 步骤直到 2h 超时被杀**：旧版 bug——cron 晚到跨过 UTC 午夜时，
   `today 22:00` 指向当天晚上而非已过的锚定点，导致傻等 ~21h 直到 timeout 被杀
   （白烧 2h 计费时长，锚定未执行，见 run #35）。
-  已修复：等待时长仅当 ≤ 2h 才生效，否则一律立即执行（timeout 已放宽到 150 min）。
+  已修复：等待时长仅当 ≤ 6h 才生效，否则一律立即执行（timeout 已放宽到 358 min）。
+- **MiniMax 报 402 insufficient balance**：M Plan 订阅余额耗尽或 key 失效，去 platform.minimax.cn/console/plan 检查；修好前 MiniMax 锚定不会生效。
 - **额度没扣（按量付费 / 报错）**：CI 里 headless 跑 Claude Code 是否被算作合规工具调用，智谱未明确。
   以控制台扣减为准；若不扣，本方案不成立，改用「通用按量 API」（见下）。
 
