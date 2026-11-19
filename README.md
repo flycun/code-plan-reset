@@ -72,7 +72,7 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 - 验证方式同 GLM：手动触发后看 Actions 日志是否正常返回 `ok`，再到 MiniMax 控制台
   确认用量扣减、窗口重置时间 ≈ 锚定 + 5h。
 
-## 部署（5 步）
+## 部署
 
 1. **新建公开仓库**（public 时 Actions 分钟免费；secrets 不会随代码泄露，安全无虞），把本目录推上去。
 2. 仓库 **Settings → Secrets and variables → Actions → Secrets**，新增：
@@ -80,15 +80,56 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
    - `MINIMAX_API_KEY` = 你的 M Plan 订阅 Key（`platform.minimax.cn/console/plan` 获取；不用 MiniMax 可不加）
 3. （可选）同一页 **Variables** 里加：
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
-4. 推送 `.github/workflows/glm-anchor.yml`，自动按 cron 运行。
-5. **部署 Cloudflare 主时钟**（治本，推荐）：在 [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) 创建 fine-grained PAT（仅本仓库，权限 Actions: Read and write），然后：
-   ```bash
-   cd anchor-dispatch
-   npx wrangler login
-   npx wrangler secret put GH_PAT   # 粘贴上一步的 PAT
-   npx wrangler deploy
-   ```
+4. 推送 `.github/workflows/glm-anchor.yml`：Cloudflare Worker（主时钟）+ GitHub cron（兜底）双触发。
+5. **部署 Cloudflare 主时钟**（治本，推荐），见下方详细步骤。
 6. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch）手动跑一次验证。
+
+### Cloudflare 主时钟部署（详细）
+
+Worker 代码在 `anchor-dispatch/`，作用：每天 **UTC 21:30（北京 05:30）** 调用
+`workflow_dispatch` 秒级触发 workflow，绕开 GitHub cron 的小时级延迟；
+workflow 内部仍会睡到 UTC 22:00 整（北京 06:00）才发起锚定调用。
+
+**第 1 步：创建 GitHub PAT**
+
+打开 [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)（Fine-grained token）：
+
+- Repository access → **Only select repositories** → 只选本仓库
+- Repository permissions → 在列表找到 **Actions**（按字母排在 Attestations 前面，可向上滚动或用搜索框）
+  → 勾选后把右侧下拉从默认的 Read-only 改为 **Read and write**
+- 其他权限一律不勾 → **Generate token** → 复制 `github_pat_` 开头的 token（只显示一次）
+
+**第 2 步：部署 Worker**
+
+⚠️ 必须在 `anchor-dispatch` 目录里执行，否则报 `Required Worker name missing`
+（Worker 名字定义在该目录的 `wrangler.toml`）：
+
+```bash
+cd anchor-dispatch
+npx wrangler login                # 浏览器授权 Cloudflare 账号
+npx wrangler secret put GH_PAT    # 回车后在 Enter a secret value 处粘贴 PAT
+npx wrangler deploy
+```
+
+说明：
+
+- `GH_PAT` 是密钥**变量名**，原样照抄不要替换——代码里用 `env.GH_PAT` 取值，真正的 token 是在回车后的提示里粘贴的；
+- 首次部署 Worker 还不存在，wrangler 提示是否创建新 Worker 时选 **Y**；
+- `wrangler.toml` 已默认 `workers_dev = false`、`preview_urls = false`：纯定时触发器不需要公开 URL，部署输出不应再出现 workers.dev 地址。
+
+**第 3 步：确认定时器生效**
+
+- 部署成功输出里应有 `schedule: 30 21 * * *`（UTC）；
+- Cloudflare 控制台：[dash.cloudflare.com](https://dash.cloudflare.com) → 左侧「构建」→「计算」
+  →「Workers 和 Pages」→ `code-plan-anchor-dispatch` → **「触发事件」/ Triggers**
+  → 「Cron 触发器」（面板显示 UTC，北京 05:30）；
+- 每次触发是否成功：「日志」标签开实时日志流，或本地 `npx wrangler tail`，触发时输出 `dispatch OK`；
+- 本地手动测试（可选）：`npx wrangler dev --test-scheduled`，然后访问
+  `http://localhost:8787/__scheduled?cron=30+21+*+*+*` 可立即触发一次 scheduled 事件。
+
+**验证整条链路**：部署后次日早上看 GitHub Actions——应出现一个 `workflow_dispatch`
+事件的 run（≈ 北京 05:30，`Anchor time (Beijing)` ≈ 06:00）；00:17 的兜底 cron run 显示
+**Cancelled 属正常**（被 dispatch 后到接管，`cancel-in-progress: true`），每天仍只有一个 run 真正锚定。
 
 ## 关键配置（已对照智谱官方文档）
 
