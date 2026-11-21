@@ -2,13 +2,15 @@ name: glm-anchor
 
 on:
   schedule:
-    # BACKUP trigger: early at UTC 16:17 (Beijing 00:17), off the top-of-hour
-    # congestion peak. PRIMARY trigger is the Cloudflare Worker in
-    # anchor-dispatch/ calling workflow_dispatch at UTC 21:30. Whichever run
-    # arrives later wins (cancel-in-progress) and sleeps until Beijing 06:00.
-    # ~5h43m buffer absorbs multi-hour cron delays while staying under the
-    # 6h-per-job hard cap. Public repo = free minutes, waiting is cost-free.
-    - cron: "17 16 * * *"
+    # BACKUP trigger: UTC 21:21 (Beijing 05:21), 39 min before the UTC 22:00
+    # anchor and 9 min before the PRIMARY Cloudflare Worker dispatch (21:30).
+    # Both runs sleep until Beijing 06:00; the later Worker run cancels the
+    # still-sleeping cron run (cancel-in-progress), so normally only the
+    # Worker run anchors. If the Worker is dead but GitHub schedules this
+    # cron on time, IT sleeps to 22:00 and anchors precisely — a real backup.
+    # Historically GitHub cron lags 2-7h; a lagging run fires AFTER the
+    # anchor and is deduped by the cache marker (see check-anchor-marker).
+    - cron: "21 21 * * *"
   workflow_dispatch:
 
 # Newest run wins: a later trigger cancels a predecessor still sitting in its
@@ -29,8 +31,9 @@ jobs:
         id: wait
         run: |
           # Hold until Beijing 06:00 (UTC 22:00) regardless of when the run
-          # actually started. Earliest trigger is the 16:17 UTC backup cron,
-          # so a legitimate wait is always < 5h45m. If the run started so
+          # actually started. Earliest possible trigger is the 21:21 UTC backup
+          # cron, so a legitimate wait is always < 39 min. Any run starting
+          # after 22:00 runs immediately (past anchor). If the run started so
           # late that the UTC date rolled over, "today 22:00" points to the
           # wrong day (diff ~21h) — run immediately instead of sleeping to
           # timeout. 6h sanity cap.
@@ -134,6 +137,7 @@ jobs:
         id: wait
         run: |
           # Same anchor as the GLM job: hold until Beijing 06:00 (UTC 22:00).
+          # Legitimate wait < 39 min (earliest trigger: 21:21 backup cron).
           # 6h sanity cap — see the anchor job's wait step for details.
           now=$(date -u +%s)
           target=$(date -u -d 'today 22:00:00' +%s)
