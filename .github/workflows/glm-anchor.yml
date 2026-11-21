@@ -19,12 +19,14 @@ concurrency:
 
 jobs:
   anchor:
+    name: anchor (GLM)
     runs-on: ubuntu-latest
     timeout-minutes: 358
     steps:
       - uses: actions/checkout@v7
 
       - name: wait-until-anchor
+        id: wait
         run: |
           # Hold until Beijing 06:00 (UTC 22:00) regardless of when the run
           # actually started. Earliest trigger is the 16:17 UTC backup cron,
@@ -38,25 +40,40 @@ jobs:
           if [ "$diff" -gt 0 ] && [ "$diff" -le 21600 ]; then
             echo "Waiting ~$(( diff/60 )) min until Beijing 06:00..."
             sleep "$diff"
+            anchor_instant=$target
+          elif [ "$diff" -le 0 ]; then
+            echo "Past anchor by $(( -diff ))s, running now."
+            anchor_instant=$target
           else
-            echo "Past anchor or abnormal gap (diff=${diff}s), run now."
+            # "today 22:00" is >6h away => we are in the post-midnight tail
+            # (UTC 00:00-16:00); the anchor we missed is YESTERDAY's 22:00.
+            echo "Abnormal gap (diff=${diff}s): missed anchor is yesterday 22:00 UTC, running now."
+            anchor_instant=$(date -u -d 'yesterday 22:00:00' +%s)
           fi
+          # Beijing date of the anchor instant == the key used by the marker
+          # cache, so a late run can prove whether that anchor already happened.
+          echo "anchor_date=$(TZ=Asia/Shanghai date -d "@$anchor_instant" +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           echo "BJ_DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_ENV"
           echo "Anchor time (Beijing): $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
-      - uses: actions/setup-node@v5
+      # Evidence check: did this provider's anchor for anchor_date already
+      # happen? The marker is written by the run that actually consumed quota.
+      # lookup-only never fails when the key is absent (cache-hit=false), and
+      # a hard failure leaves cache-hit empty -> fail-open (we anchor anyway).
+      - name: prepare-marker-dir
+        run: mkdir -p .anchor-marker
+
+      - name: check-anchor-marker
+        id: marker
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
-          node-version: 22
-
-      - name: install-claude-code
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: skip-onboarding
-        run: |
-          mkdir -p ~/.claude
-          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
+          path: .anchor-marker
+          key: anchor-glm-${{ steps.wait.outputs.anchor_date }}
+          lookup-only: true
 
       - name: compose-mail
+        if: steps.marker.outputs.cache-hit != 'true'
         env:
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
@@ -69,7 +86,27 @@ jobs:
             --output-format text > email-body.html
           echo "bytes:"; wc -c < email-body.html
 
+      # Record the anchor BEFORE sending mail: quota is consumed by the
+      # claude call above, so the marker must exist even if SMTP fails.
+      - name: write-anchor-marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .anchor-marker
+          {
+            echo "anchored_at=$(date -u +%FT%TZ)"
+            echo "anchor_date=${{ steps.wait.outputs.anchor_date }}"
+          } > .anchor-marker/marker
+
+      - name: mark-anchored
+        if: steps.marker.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .anchor-marker
+          key: anchor-glm-${{ steps.wait.outputs.anchor_date }}
+
       - name: send-mail
+        if: steps.marker.outputs.cache-hit != 'true'
         uses: dawidd6/action-send-mail@v18
         with:
           server_address: smtp.163.com
@@ -86,6 +123,7 @@ jobs:
   # identical triggers + identical wait-until-anchor step, then one minimal
   # `claude -p` call via MiniMax's Anthropic-compatible endpoint.
   anchor-minimax:
+    name: anchor (MiniMax)
     runs-on: ubuntu-latest
     timeout-minutes: 358
     concurrency:
@@ -93,6 +131,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: wait-until-anchor
+        id: wait
         run: |
           # Same anchor as the GLM job: hold until Beijing 06:00 (UTC 22:00).
           # 6h sanity cap — see the anchor job's wait step for details.
@@ -102,24 +141,31 @@ jobs:
           if [ "$diff" -gt 0 ] && [ "$diff" -le 21600 ]; then
             echo "Waiting ~$(( diff/60 )) min until Beijing 06:00..."
             sleep "$diff"
+            anchor_instant=$target
+          elif [ "$diff" -le 0 ]; then
+            echo "Past anchor by $(( -diff ))s, running now."
+            anchor_instant=$target
           else
-            echo "Past anchor or abnormal gap (diff=${diff}s), run now."
+            echo "Abnormal gap (diff=${diff}s): missed anchor is yesterday 22:00 UTC, running now."
+            anchor_instant=$(date -u -d 'yesterday 22:00:00' +%s)
           fi
+          echo "anchor_date=$(TZ=Asia/Shanghai date -d "@$anchor_instant" +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           echo "Anchor time (Beijing): $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
-      - uses: actions/setup-node@v5
+      - name: prepare-marker-dir
+        run: mkdir -p .anchor-marker
+
+      - name: check-anchor-marker
+        id: marker
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
-          node-version: 22
-
-      - name: install-claude-code
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: skip-onboarding
-        run: |
-          mkdir -p ~/.claude
-          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
+          path: .anchor-marker
+          key: anchor-minimax-${{ steps.wait.outputs.anchor_date }}
+          lookup-only: true
 
       - name: anchor-ping
+        if: steps.marker.outputs.cache-hit != 'true'
         env:
           # M Plan (platform.minimax.cn subscription): https://api.minimax.cn/anthropic
           # International (platform.minimax.io):        https://api.minimax.io/anthropic
@@ -134,3 +180,20 @@ jobs:
             --dangerously-skip-permissions \
             --output-format text
           echo "MiniMax anchor call done at $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
+
+      - name: write-anchor-marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .anchor-marker
+          {
+            echo "anchored_at=$(date -u +%FT%TZ)"
+            echo "anchor_date=${{ steps.wait.outputs.anchor_date }}"
+          } > .anchor-marker/marker
+
+      - name: mark-anchored
+        if: steps.marker.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .anchor-marker
+          key: anchor-minimax-${{ steps.wait.outputs.anchor_date }}

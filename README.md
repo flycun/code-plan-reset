@@ -31,6 +31,25 @@ GitHub Actions 的 cron 是「尽力而为」：官方文档明说高负载（�
 > 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费，可放心用 ~5h45m 提前量
 > 扛 cron 延迟。若改回私有，需在「扛延迟」和「烧分钟数」（2000 min/月）之间取舍。
 
+### 去重：缓存标记（避免迟到 run 重复消耗额度）
+
+cron 兜底常常迟到 5~7 小时，醒来时锚定点已过，于是会**再跑一遍**完整流程——重复消耗一次
+套餐额度、重复发一封 Trending 邮件。
+
+现在用 **GitHub Actions 缓存做「今天是否已锚定」的证据标记**：
+
+- 真正完成锚定的那次 run（额度已消耗）在结束时写入标记：key = `anchor-<provider>-<锚定日的北京日期>`
+- 后续任何 run 在干活前先 `actions/cache/restore`（`lookup-only: true`，不下载内容）查这个 key
+  - **命中** → 今天这个 provider 已锚定过 → 跳过调用、跳过写标记、跳过发邮件
+  - **未命中** → 正常执行（Worker 挂掉时的兜底路径依然生效）
+- GLM 与 MiniMax 各用各的 key（`anchor-glm-*` / `anchor-minimax-*`），互不影响
+
+判定用的是「锚定时刻对应的北京日期」，而不是 run 的启动日期——同一天的所有触发
+（Worker 21:30、cron 16:17、迟到的 22:41/23:05）算出的是同一个 key，所以能正确互相识别。
+
+> 失败时 **fail-open**：缓存服务不可用 / 查询报错 → `cache-hit` 为空 → 照常执行锚定。
+> 宁可多消耗一次额度，也不漏掉锚定。
+
 ## 上午能用多久（重置点 = 11:00 时）
 
 | 北京时间 | 10:00–11:00 | 11:00–12:00 | 12:00–13:00 |
@@ -69,6 +88,7 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
 - MiniMax job 只发最小 `ping` 调用（目的只是消耗一次额度锚定窗口），**不发 Trending 邮件**；
   想让 MiniMax 也跑 Trending 任务的话，把 `anchor-ping` 步骤的 prompt 换成
   `$(cat .github/prompts/trending.txt)` 并仿照 GLM job 加 send-mail 步骤即可。
+- 两个 job 各用各的去重标记（`anchor-glm-*` / `anchor-minimax-*`），互不干扰。
 - 验证方式同 GLM：手动触发后看 Actions 日志是否正常返回 `ok`，再到 MiniMax 控制台
   确认用量扣减、窗口重置时间 ≈ 锚定 + 5h。
 
