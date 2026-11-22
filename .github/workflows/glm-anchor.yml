@@ -75,6 +75,24 @@ jobs:
           key: anchor-glm-${{ steps.wait.outputs.anchor_date }}
           lookup-only: true
 
+      # Restore the toolchain steps dropped in 90f8778 (caused the Nov 22
+      # failures: claude: command not found, exit 127). Guarded by the same
+      # condition so a marker-hit skip day doesn't even pay for npm install.
+      - uses: actions/setup-node@v5
+        if: steps.marker.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+
+      - name: install-claude-code
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: skip-onboarding
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.claude
+          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
+
       - name: compose-mail
         if: steps.marker.outputs.cache-hit != 'true'
         env:
@@ -167,6 +185,22 @@ jobs:
           path: .anchor-marker
           key: anchor-minimax-${{ steps.wait.outputs.anchor_date }}
           lookup-only: true
+
+      # Restore the toolchain steps dropped in 90f8778 (see anchor job note).
+      - uses: actions/setup-node@v5
+        if: steps.marker.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+
+      - name: install-claude-code
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: skip-onboarding
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.claude
+          printf '%s\n' '{"hasCompletedOnboarding":true}' > ~/.claude.json
 
       - name: anchor-ping
         if: steps.marker.outputs.cache-hit != 'true'
