@@ -4,8 +4,11 @@ workers_dev = false   # 本 Worker 只响应定时事件，关掉多余的 worke
 preview_urls = false   # 同理，关掉 Preview URL
 compatibility_date = "2026-11-01"
 
-# UTC 21:30 daily (Beijing 05:30): fire the GitHub workflow_dispatch 30 min
-# before the UTC 22:00 anchor. The workflow itself sleeps to the exact minute.
+# Two anchor slots per day. Both fire 30 min before the anchor instant:
+#   "30 21 * * *" -> slot a, anchors at UTC 22:00 = Beijing 06:00
+#   "40  2 * * *" -> slot b, anchors at UTC 03:10 = Beijing 11:10
+# The workflow sleeps to the exact anchor instant and dedups via a cache
+# marker whose key contains the slot id.
 # Cloudflare cron triggers normally fire within seconds of the schedule.
 [triggers]
-crons = ["30 21 * * *"]
+crons = ["30 21 * * *", "40 2 * * *"]
