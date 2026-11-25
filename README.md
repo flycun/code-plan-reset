@@ -18,34 +18,35 @@
                          上午 10-11 用 A，11-12 用 B
 ```
 
-### 锚定精度：双保险触发 + 睡到整点
+### 锚定精度：Cloudflare 主时钟 + 睡到整点
 
-GitHub Actions 的 cron 是「尽力而为」：官方文档明说高负载（尤其整点）会延迟甚至丢任务，实测延迟 3~7 小时。为保证锚定时刻精确，workflow
-采用**双保险触发**，job 内 `wait-until-anchor` 步骤一律睡到 UTC 22:00 整
-（北京 06:00）再发起 `claude -p`：
+GitHub Actions 的 cron 是「尽力而为」：官方文档明说高负载（尤其整点）会延迟甚至丢任务。
+实测兜底 cron 每天迟到 4~8 小时、醒来即被去重秒退，从未起过作用——**已移除 schedule 触发**。
+现在唯一触发器是 **Cloudflare Worker**（`anchor-dispatch/`）：在 UTC 21:30（北京 05:30）调用
+`workflow_dispatch`，run 秒级启动；job 内 `wait-until-anchor` 步骤睡到 UTC 22:00 整
+（北京 06:00）再发起 `claude -p`。
 
-- **主时钟**：Cloudflare Worker（`anchor-dispatch/`）在 UTC 21:30（北京 05:30）调用 `workflow_dispatch`，run 秒级启动
-- **兜底**：GitHub cron 在 UTC 21:21（北京 05:21）触发——比 Worker 早 9 分钟，同样避开整点高峰；两个 run 都睡到 06:00，后到的 Worker run 会取消仍在睡的 cron run（`cancel-in-progress: true`），每天只有一个 run 真正锚定。若 Worker 挂了而 cron 准点，cron run 自己睡到整点精确锚定——这才是真正能发挥作用的兜底（旧版 16:17 提前 5h45m 的设计，被 GitHub 实测 2~7h 的调度延迟彻底击穿，从未准点过）
-- cron 若迟到（实测中位 ~2.2h，最长 ~7h）→ 醒来时已过锚定点 → 靠缓存标记去重（见下节）：当天已锚定则跳过，未锚定则立即补跑（重置点随实际触发时刻漂移）
+> 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费（最长 ~30 分钟）。
+> 若改回私有，需在「扛延迟」和「烧分钟数」（2000 min/月）之间取舍。
+> ⚠️ Worker 是唯一触发器，成为新的单点：它挂了 / GH_PAT 过期，当天就没有锚定（窗口漂移），
+> 排查见下方「Cloudflare 主时钟部署」的日志方式。
 
-> 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费（最长 ~39 分钟），
-> 可放心用提前量扛调度延迟。若改回私有，需在「扛延迟」和「烧分钟数」（2000 min/月）之间取舍。
+### 去重：缓存标记（避免重复消耗额度）
 
-### 去重：缓存标记（避免迟到 run 重复消耗额度）
+Worker dispatch 自带 3 次重试：若某次 dispatch 已成功但响应丢失，重试会多起一个 run——
+重复消耗一次套餐额度、重复发一封 Trending 邮件。手动误触同理。
 
-cron 兜底常常迟到 5~7 小时，醒来时锚定点已过，于是会**再跑一遍**完整流程——重复消耗一次
-套餐额度、重复发一封 Trending 邮件。
+用 **GitHub Actions 缓存做「今天是否已锚定」的证据标记**：
 
-现在用 **GitHub Actions 缓存做「今天是否已锚定」的证据标记**：
-
-- 真正完成锚定的那次 run（额度已消耗）在结束时写入标记：key = `anchor-<provider>-<锚定日的北京日期>`
+- 真正完成锚定的那次 run（额度已消耗）在结束时写入标记：key = `anchor-<provider>-<slot>-<锚定日的北京日期>`
 - 后续任何 run 在干活前先 `actions/cache/restore`（`lookup-only: true`，不下载内容）查这个 key
-  - **命中** → 今天这个 provider 已锚定过 → 跳过调用、跳过写标记、跳过发邮件
-  - **未命中** → 正常执行（Worker 挂掉时的兜底路径依然生效）
+  - **命中** → 今天这个 slot + provider 已锚定过 → 跳过调用、跳过写标记、跳过发邮件
+  - **未命中** → 正常执行
 - GLM 与 MiniMax 各用各的 key（`anchor-glm-*` / `anchor-minimax-*`），互不影响
+- 叠加 `concurrency`（`cancel-in-progress: true`）：晚到的 run 会先取消仍在睡的旧 run
 
-判定用的是「锚定时刻对应的北京日期」，而不是 run 的启动日期——同一天的所有触发
-（Worker 21:30、cron 21:21、迟到的补跑）算出的是同一个 key，所以能正确互相识别。
+判定用的是「锚定时刻对应的北京日期」，而不是 run 的启动日期——同一天同一 slot 的所有
+触发算出的是同一个 key，所以能正确互相识别。
 
 > 失败时 **fail-open**：缓存服务不可用 / 查询报错 → `cache-hit` 为空 → 照常执行锚定。
 > 宁可多消耗一次额度，也不漏掉锚定。
@@ -62,7 +63,8 @@ cron 兜底常常迟到 5~7 小时，醒来时锚定点已过，于是会**再�
 
 ## MiniMax 窗口锚定（与 GLM 同一时刻）
 
-同一 workflow 里有第二个 job `anchor-minimax`，**与 GLM 用同一个 cron、同样的“提前触发 + 睡到
+同一 workflow 里有第二个 job `anchor-minimax`，**与 GLM 用同一触发（Cloudflare Worker
+dispatch）、同样的“提前触发 + 睡到
 北京 06:00”等待逻辑**，在完全相同的时刻向 MiniMax 的 Anthropic 兼容端点发一次最小调用（`ping`），
 把 MiniMax Coding Plan 的 5h 窗口也钉在 06:00 → 11:00 重置。两个套餐、四个窗口：
 
@@ -100,7 +102,7 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
    - `MINIMAX_API_KEY` = 你的 M Plan 订阅 Key（`platform.minimax.cn/console/plan` 获取；不用 MiniMax 可不加）
 3. （可选）同一页 **Variables** 里加：
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
-4. 推送 `.github/workflows/glm-anchor.yml`：Cloudflare Worker（主时钟）+ GitHub cron（兜底）双触发。
+4. 推送 `.github/workflows/glm-anchor.yml`：唯一触发器是下方部署的 Cloudflare Worker。
 5. **部署 Cloudflare 主时钟**（治本，推荐），见下方详细步骤。
 6. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch）手动跑一次验证。
 
@@ -139,7 +141,7 @@ npx wrangler deploy
 
 **第 3 步：确认定时器生效**
 
-- 部署成功输出里应有 `schedule: 30 21 * * *`（UTC）；
+- 部署成功输出里应有 `schedule: 30 21 * * *, 40 2 * * *`（UTC，两个锚定 slot）；
 - Cloudflare 控制台：[dash.cloudflare.com](https://dash.cloudflare.com) → 左侧「构建」→「计算」
   →「Workers 和 Pages」→ `code-plan-anchor-dispatch` → **「触发事件」/ Triggers**
   → 「Cron 触发器」（面板显示 UTC，北京 05:30）；
@@ -148,8 +150,7 @@ npx wrangler deploy
   `http://localhost:8787/__scheduled?cron=30+21+*+*+*` 可立即触发一次 scheduled 事件。
 
 **验证整条链路**：部署后次日早上看 GitHub Actions——应出现一个 `workflow_dispatch`
-事件的 run（≈ 北京 05:30，`Anchor time (Beijing)` ≈ 06:00）；05:21 的兜底 cron run 显示
-**Cancelled 属正常**（被 dispatch 后到接管，`cancel-in-progress: true`），每天仍只有一个 run 真正锚定。
+事件的 run（≈ 北京 05:30，`Anchor time (Beijing)` ≈ 06:00），且是当天唯一的锚定 run。
 
 ## 关键配置（已对照智谱官方文档）
 
@@ -206,29 +207,28 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 ## 调整重置点
 
-公式：`锚定(北京) = 想要的重置点 − 5h`；`cron(UTC) = 锚点 − 39min`（Worker cron = 锚点 − 30min）。
+公式：`锚定(北京) = 想要的重置点 − 5h`；Worker cron（UTC）= 锚点 − 30min。
 
-改锚定点要改 workflow 里**两处**：
-1. `on.schedule.cron`（锚点前 39min）和 `anchor-dispatch/wrangler.toml` 的 Worker cron（锚点前 30min）
-2. `wait-until-anchor` 里的 `today 22:00:00`（UTC 锚定整点，睡到此刻再执行）
+改锚定点要改**两处**（改完 Worker 需重新 `npx wrangler deploy`）：
+1. `anchor-dispatch/wrangler.toml` 的 Worker cron（锚点前 30min 触发）
+2. `wait-until-anchor` 里的锚定整点（slot a `22:00:00` / slot b `03:10:00`，UTC）
 
-| 想要的重置点 | 锚定(北京) | cron (UTC) | Worker cron (UTC) | wait 睡到 (UTC) | 上午可用时段 |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| 09:00 | 04:00 | `21 19 * * *` | `30 19 * * *` | 20:00 | 08:00–10:00 |
-| 10:00 | 05:00 | `21 20 * * *` | `30 20 * * *` | 21:00 | 09:00–11:00 |
-| **11:00**（默认） | **06:00** | **`21 21 * * *`** | **`30 21 * * *`** | **22:00** | **10:00–12:00** |
+| 想要的重置点 | 锚定(北京) | Worker cron (UTC) | wait 睡到 (UTC) | 上午可用时段 |
+|:---:|:---:|:---:|:---:|:---:|
+| 09:00 | 04:00 | `30 19 * * *` | 20:00 | 08:00–10:00 |
+| 10:00 | 05:00 | `30 20 * * *` | 21:00 | 09:00–11:00 |
+| **11:00**（默认） | **06:00** | **`30 21 * * *`** | **22:00** | **10:00–12:00** |
 
-> cron 比锚点提前 39 分钟、比 Worker 早 9 分钟：准点则自己睡到整点精确锚定；迟到（实测中位 ~2.2h）
-> 则靠缓存标记去重。public 仓库分钟免费，等待不计费。
+> public 仓库分钟免费，等待不计费。
 > 「上午可用时段」= 重置点前后各约 1 小时（两个窗口各撑约 1h）。
 
 ## 排查 FAQ
 
 - **重置点漂移 / 没钉住**：多半是前一天用到太晚，前一个窗口越过锚定点。
   保证前一天 24:00 前停用即可（正常作息天然满足）。
-- **GitHub Actions 触发延迟**：高峰期 cron 可能晚几分钟到几小时（实测中位 ~2.2h，最长 ~7h）。
-  cron 在锚点前起跑（< 06:00 北京）→ 睡到整点，锚定不受影响；过了锚点 → 缓存标记命中则跳过、
-  未命中则立即补跑（重置点随实际触发时刻漂移），属正常。
+- **GitHub Actions 触发延迟**：已不依赖 schedule cron（实测每天迟到 4~8h、从未准点，已移除），
+  改由 Cloudflare Worker 的 `workflow_dispatch` 秒级触发。若某天没有锚定 run，先查 Worker：
+  `npx wrangler tail` 看触发日志、确认 GH_PAT 未过期，必要时手动 Run workflow 补锚。
 - **run 卡在 wait 步骤直到 2h 超时被杀**：旧版 bug——cron 晚到跨过 UTC 午夜时，
   `today 22:00` 指向当天晚上而非已过的锚定点，导致傻等 ~21h 直到 timeout 被杀
   （白烧 2h 计费时长，锚定未执行，见 run #35）。
@@ -241,7 +241,7 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 - **合规灰色地带**：智谱称套餐「严禁用于自动化脚本」。技术上本方案是 Claude Code 客户端发起的
   合法工具调用（带正确 UA），但 CI headless 是否被认可，**需你部署后用控制台扣减情况实测确认**。
-- **不可控因素**：GitHub schedule 延迟、智谱识别策略变化，都可能影响窗口精度。
+- **不可控因素**：Cloudflare Worker / GH_PAT 失效、智谱识别策略变化，都可能影响窗口精度。
 
 ## 备选：不追求套餐额度
 

@@ -1,18 +1,11 @@
 name: glm-anchor
 
 on:
-  schedule:
-    # Two anchor slots per Beijing day:
-    #   slot a -> UTC 22:00 = Beijing 06:00  (5h window A opens, resets 11:00)
-    #   slot b -> UTC 03:10 = Beijing 11:10  (5h window B opens, resets 16:10)
-    # Both crons fire 39 min before their slot. PRIMARY trigger is the
-    # Cloudflare Worker in anchor-dispatch/ (workflow_dispatch with a `slot`
-    # input); these crons are the fallback. Whichever run arrives later wins
-    # (cancel-in-progress) and sleeps until the exact anchor instant.
-    # A late cron run fires after its anchor point and is deduped by the
-    # cache marker (see check-anchor-marker).
-    - cron: "21 21 * * *"   # slot a backup
-    - cron: "1 3 * * *"     # slot b backup
+  # Sole trigger: the Cloudflare Worker in anchor-dispatch/ fires a
+  # workflow_dispatch with a `slot` input 30 min before each anchor instant.
+  # GitHub schedule crons were removed: in practice they fired 4-8h late
+  # every day (observed 2026-11), arrived after the anchor, and were deduped
+  # in seconds — pure noise. Manual UI runs still work (slot defaults to "a").
   workflow_dispatch:
     inputs:
       slot:
@@ -36,12 +29,9 @@ jobs:
       matrix:
         provider: [glm, minimax]
     env:
-      # Which anchor slot this run serves. Determined by the trigger, never
-      # guessed from the clock:
-      #   - schedule event  -> the cron expression that fired it
-      #   - workflow_dispatch -> the `slot` input sent by the Cloudflare Worker
-      # The cron schedule "1 3 * * *" serves slot b; everything else slot a.
-      SLOT: ${{ github.event_name == 'schedule' && github.event.schedule == '1 3 * * *' && 'b' || 'a' }}
+      # Which anchor slot this run serves — the `slot` dispatch input sent by
+      # the Cloudflare Worker (manual UI runs default to "a"), never guessed
+      # from the clock.
       DISPATCH_SLOT: ${{ inputs.slot }}
     steps:
       - uses: actions/checkout@v7
@@ -53,19 +43,12 @@ jobs:
           # run actually started.
           #   slot a -> UTC 22:00 = Beijing 06:00
           #   slot b -> UTC 03:10 = Beijing 11:10
-          # The slot id comes from the trigger, so every trigger of the same
-          # slot resolves to the same anchor instant and therefore to the same
-          # marker key.
+          # The slot id comes from the dispatch input, so every trigger of the
+          # same slot resolves to the same anchor instant and therefore to the
+          # same marker key.
           #
-          # workflow_dispatch carries the slot in `inputs.slot`; a schedule
-          # event carries the cron expression. Prefer the input when present.
-          if [ -n "$DISPATCH_SLOT" ] && [ "$DISPATCH_SLOT" != "a" ]; then
-            slot="$DISPATCH_SLOT"
-          elif [ -n "$DISPATCH_SLOT" ]; then
-            slot="a"
-          else
-            slot="$SLOT"
-          fi
+          # The slot comes from the dispatch input (manual UI runs default to "a").
+          slot="${DISPATCH_SLOT:-a}"
           case "$slot" in
             a) anchor_time="22:00:00" ;;
             b) anchor_time="03:10:00" ;;
