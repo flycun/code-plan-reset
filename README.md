@@ -1,7 +1,8 @@
 # GLM Code Plan 窗口锚定（GitHub Actions）
 
-每天凌晨用 GitHub Actions 跑一次 Claude Code（headless），消耗一次 GLM Code Plan 套餐额度，
-把 5 小时窗口的**重置点**钉在上午，让你在上午工作时段用上**两个窗口**的额度。
+每天用 Cloudflare Worker 定时触发 GitHub Actions 跑 Claude Code（headless），在两个锚定点
+（北京 06:00 / 11:10）各消耗一次 GLM Code Plan 套餐额度，把 5 小时窗口的**重置点**钉在上午，
+让你在上午工作时段用上**两个窗口**的额度。
 
 > Code Plan 单窗口额度较小（约 1 小时即用完），单窗口撑不满一上午。
 > 本方案让重置点落在上午中间——前半段用一个窗口、后半段用另一个窗口。
@@ -10,21 +11,22 @@
 
 - Code Plan 的 5h 窗口是**动态滚动**的：窗口 = 该窗口内**首次套餐消耗**时刻 + 5h；到期后下次消耗启动新窗口。
 - 所以**锚定调用的时刻**决定了**重置点**：`重置点 = 锚定时刻 + 5h`。
-- 每天凌晨跑一次最小调用 → 把窗口钉死 → 上午重置点可预测。
+- 每天在两个锚定点（slot a 凌晨 + slot b 上午）各消耗一次 → 窗口 A/B 的开启时刻都被钉死 → 重置点可预测。
 
 ```
-锚定(北京06:00) ──窗口A(5h)──▶ 重置(北京11:00) ──窗口B(5h)──▶ 重置(北京16:00)
-                                   ↑
-                         上午 10-11 用 A，11-12 用 B
+锚定 slot a(北京06:00) ──窗口A(5h)──▶ 重置(北京11:00)
+锚定 slot b(北京11:10) ──窗口B(5h)──▶ 重置(北京16:10)
+                     ↑ 上午 10-11 用 A，11:10-12:10 用 B
 ```
 
 ### 锚定精度：Cloudflare 主时钟 + 睡到整点
 
 GitHub Actions 的 cron 是「尽力而为」：官方文档明说高负载（尤其整点）会延迟甚至丢任务。
 实测兜底 cron 每天迟到 4~8 小时、醒来即被去重秒退，从未起过作用——**已移除 schedule 触发**。
-现在唯一触发器是 **Cloudflare Worker**（`anchor-dispatch/`）：在 UTC 21:30（北京 05:30）调用
-`workflow_dispatch`，run 秒级启动；job 内 `wait-until-anchor` 步骤睡到 UTC 22:00 整
-（北京 06:00）再发起 `claude -p`。
+现在唯一触发器是 **Cloudflare Worker**（`anchor-dispatch/`）：每天两次调用 `workflow_dispatch`
+（带 `slot` 输入）——UTC 21:30（北京 05:30，slot a）和 UTC 02:40（北京 10:40，slot b），
+run 秒级启动；job 内 `wait-until-anchor` 步骤睡到各自锚定整点
+（slot a → UTC 22:00 / 北京 06:00；slot b → UTC 03:10 / 北京 11:10）再发起调用。
 
 > 💡 仓库为 public 时 Actions 分钟免费，wait 的睡眠时间不计费（最长 ~30 分钟）。
 > 若改回私有，需在「扛延迟」和「烧分钟数」（2000 min/月）之间取舍。
@@ -51,26 +53,26 @@ Worker dispatch 自带 3 次重试：若某次 dispatch 已成功但响应丢失
 > 失败时 **fail-open**：缓存服务不可用 / 查询报错 → `cache-hit` 为空 → 照常执行锚定。
 > 宁可多消耗一次额度，也不漏掉锚定。
 
-## 上午能用多久（重置点 = 11:00 时）
+## 上午能用多久（窗口 B 由 slot b 钉在 11:10 开启）
 
-| 北京时间 | 10:00–11:00 | 11:00–12:00 | 12:00–13:00 |
+| 北京时间 | 10:00–11:00 | 11:10–12:10 | 12:10 之后 |
 |---------|:---:|:---:|:---:|
-| 额度来源 | 窗口 A（满额） | 窗口 B（满额） | ⛔ 空（等 16:00 重置） |
+| 额度来源 | 窗口 A（满额） | 窗口 B（满额） | ⛔ 空（等 16:10 重置） |
 | 状态 | ✅ 可用 ~1h | ✅ 可用 ~1h | 无额度 |
 
-**上午可连续满负荷用 2 小时（10:00–12:00）。** 12 点后到 16:00 断档——这是 5h 间隔的硬上限，
+**上午可连续满负荷用 2 小时（10:00–12:10）。** 之后到 16:10 断档——这是 5h 间隔的硬上限，
 上午最多跨 2 个窗口，用不上第 3 个。
 
 ## MiniMax 窗口锚定（与 GLM 同一时刻）
 
 同一 workflow 里有第二个 job `anchor-minimax`，**与 GLM 用同一触发（Cloudflare Worker
-dispatch）、同样的“提前触发 + 睡到
-北京 06:00”等待逻辑**，在完全相同的时刻向 MiniMax 的 Anthropic 兼容端点发一次最小调用（`ping`），
-把 MiniMax Coding Plan 的 5h 窗口也钉在 06:00 → 11:00 重置。两个套餐、四个窗口：
+dispatch）、同样的“提前触发 + 睡到锚定整点”等待逻辑**，在两个锚定时刻（06:00 / 11:10）各向
+MiniMax 的 Anthropic 兼容端点发一次最小调用（`ping`），把 MiniMax Coding Plan 的 5h 窗口
+也钉在同样的两个重置点。两个套餐、四个窗口：
 
 ```
-GLM     窗口A 06:00–11:00 │ 窗口B 11:00–16:00
-MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
+GLM     窗口A 06:00–11:00 │ 窗口B 11:10–16:10
+MiniMax 窗口A 06:00–11:00 │ 窗口B 11:10–16:10
 ```
 
 ### 额外要加的 Secrets / Variables
@@ -104,13 +106,15 @@ MiniMax 窗口A 06:00–11:00 │ 窗口B 11:00–16:00
    - `GLM_MODEL` = `glm-4.6`（模型名，以智谱接入指南为准）
 4. 推送 `.github/workflows/glm-anchor.yml`：唯一触发器是下方部署的 Cloudflare Worker。
 5. **部署 Cloudflare 主时钟**（治本，推荐），见下方详细步骤。
-6. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch）手动跑一次验证。
+6. 先到 **Actions → GLM Code Plan 窗口锚定 → Run workflow**（workflow_dispatch，slot 选 `a`）
+   手动跑一次验证。⚠️ 手动触发时若已过该 slot 当天锚点，会**立即以当前时刻为锚**消耗额度
+   （重置点 = 现在 + 5h）；想精确锚定请等 Worker 定时触发。
 
 ### Cloudflare 主时钟部署（详细）
 
-Worker 代码在 `anchor-dispatch/`，作用：每天 **UTC 21:30（北京 05:30）** 调用
-`workflow_dispatch` 秒级触发 workflow，绕开 GitHub cron 的小时级延迟；
-workflow 内部仍会睡到 UTC 22:00 整（北京 06:00）才发起锚定调用。
+Worker 代码在 `anchor-dispatch/`，作用：每天 **UTC 21:30（北京 05:30，slot a）** 和
+**UTC 02:40（北京 10:40，slot b）** 各调用一次 `workflow_dispatch` 秒级触发 workflow，
+绕开 GitHub cron 的小时级延迟；workflow 内部睡到各自锚定整点（北京 06:00 / 11:10）才发起锚定调用。
 
 **第 1 步：创建 GitHub PAT**
 
@@ -120,6 +124,9 @@ workflow 内部仍会睡到 UTC 22:00 整（北京 06:00）才发起锚定调用
 - Repository permissions → 在列表找到 **Actions**（按字母排在 Attestations 前面，可向上滚动或用搜索框）
   → 勾选后把右侧下拉从默认的 Read-only 改为 **Read and write**
 - 其他权限一律不勾 → **Generate token** → 复制 `github_pat_` 开头的 token（只显示一次）
+- ⚠️ **Expiration 别用默认 30 天**：过期后 Worker dispatch 收 401、当天无锚定。选 **No expiration**
+  或 90 天+日历提醒；随时可在 [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)
+  查有效期。换新 token 时只需 `npx wrangler secret put GH_PAT` 重新粘贴，**无需重新 deploy**。
 
 **第 2 步：部署 Worker**
 
@@ -149,8 +156,9 @@ npx wrangler deploy
 - 本地手动测试（可选）：`npx wrangler dev --test-scheduled`，然后访问
   `http://localhost:8787/__scheduled?cron=30+21+*+*+*` 可立即触发一次 scheduled 事件。
 
-**验证整条链路**：部署后次日早上看 GitHub Actions——应出现一个 `workflow_dispatch`
-事件的 run（≈ 北京 05:30，`Anchor time (Beijing)` ≈ 06:00），且是当天唯一的锚定 run。
+**验证整条链路**：部署后次日看 GitHub Actions——应出现两个 `workflow_dispatch`
+事件的 run（≈ 北京 05:30 和 10:40，`Anchor time (Beijing)` 分别 ≈ 06:00 / 11:10），
+各含 GLM 与 MiniMax 两个 job；slot a 的 GLM job 会发 Trending 邮件，slot b 只发最小 ping。
 
 ## 关键配置（已对照智谱官方文档）
 
@@ -175,7 +183,8 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 
 ## 每日任务：GitHub Trending 邮件
 
-锚定调用不只是 `ping`——它每天会抓取 **GitHub 每日热门仓库 Top 10**，整理成 HTML 邮件发到你的 163 邮箱。
+锚定调用不只是 `ping`——**slot a（每天 06:00）** 的 GLM 锚定会抓取 **GitHub 每日热门仓库 Top 10**，
+整理成 HTML 邮件发到你的 163 邮箱（slot b 只发最小 ping，只锚窗口不发邮件）。
 （任务 prompt 在 `.github/prompts/trending.txt`，可自由修改；任务 prompt 用中文随便写，不受 workflow 注册限制。）
 
 ### 额外要加的 Secrets
@@ -200,7 +209,7 @@ MiniMax 侧对应配置（已对照 M Plan 官方文档）：
 手动触发后看两处：
 
 - **GitHub Actions 日志**：`claude -p` 是否正常返回（非报错）、`wait-until-anchor` 末尾打印的
-  `Anchor time (Beijing)` 是否 ≈ 06:00。
+  `Anchor time (Beijing)` 是否 ≈ 06:00（slot a）/ 11:10（slot b）。
 - **z.ai / 智谱控制台**：套餐额度是否**扣减**、当前窗口**重置时间**是否 ≈ 锚定时刻 + 5h（约 11:00）。
   - 额度**没扣** → CI headless 调用未被识别为套餐消耗，见下方「风险」。
   - 重置时间**不对** → 锚定没生效（前窗口未到期 / 触发延迟），见「排查」。
