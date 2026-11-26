@@ -8,8 +8,12 @@ on:
   # in seconds — pure noise. Manual UI runs still work (slot defaults to "a").
   workflow_dispatch:
     inputs:
+      provider:
+        description: "Provider to anchor: glm or minimax"
+        required: false
+        default: "glm"
       slot:
-        description: "Anchor slot: a = Beijing 06:00, b = Beijing 11:10"
+        description: "Anchor slot: a = morning, b = midday"
         required: false
         default: "a"
 
@@ -21,17 +25,14 @@ concurrency:
 
 jobs:
   anchor:
-    name: anchor (${{ matrix.provider }})
+    name: anchor (${{ inputs.provider }} / ${{ inputs.slot }})
     runs-on: ubuntu-latest
     timeout-minutes: 358
-    strategy:
-      fail-fast: false
-      matrix:
-        provider: [glm, minimax]
     env:
-      # Which anchor slot this run serves — the `slot` dispatch input sent by
-      # the Cloudflare Worker (manual UI runs default to "a"), never guessed
+      # Which provider+slot this run serves — the dispatch inputs sent by the
+      # Cloudflare Worker (manual UI runs default to glm/a), never guessed
       # from the clock.
+      DISPATCH_PROVIDER: ${{ inputs.provider }}
       DISPATCH_SLOT: ${{ inputs.slot }}
     steps:
       - uses: actions/checkout@v7
@@ -39,22 +40,29 @@ jobs:
       - name: wait-until-anchor
         id: wait
         run: |
-          # Hold until the anchor instant of THIS slot, regardless of when the
-          # run actually started.
-          #   slot a -> UTC 22:00 = Beijing 06:00
-          #   slot b -> UTC 03:10 = Beijing 11:10
-          # The slot id comes from the dispatch input, so every trigger of the
-          # same slot resolves to the same anchor instant and therefore to the
-          # same marker key.
+          # Hold until the anchor instant of THIS provider+slot, regardless of
+          # when the run actually started.
           #
-          # The slot comes from the dispatch input (manual UI runs default to "a").
+          #   glm     slot a -> UTC 22:00 = Beijing 06:00  (window 06:00-11:00)
+          #   minimax slot a -> UTC 22:30 = Beijing 06:30  (window 06:30-11:30)
+          #   glm     slot b -> UTC 03:10 = Beijing 11:10  (window 11:10-16:10)
+          #   minimax slot b -> UTC 03:40 = Beijing 11:40  (window 11:40-16:40)
+          #
+          # The 30-min stagger keeps the two 5h windows from expiring at the
+          # same time, and covers GLM's 14:00-18:00 peak window (2x credits)
+          # with MiniMax. provider+slot come from the dispatch inputs, so every
+          # trigger of the same target resolves to the same anchor instant and
+          # therefore to the same marker key.
+          provider="${DISPATCH_PROVIDER:-glm}"
           slot="${DISPATCH_SLOT:-a}"
-          case "$slot" in
-            a) anchor_time="22:00:00" ;;
-            b) anchor_time="03:10:00" ;;
-            *) echo "Unknown slot '$slot'"; exit 1 ;;
+          case "$provider/$slot" in
+            glm/a)     anchor_time="22:00:00" ;;
+            minimax/a) anchor_time="22:30:00" ;;
+            glm/b)     anchor_time="03:10:00" ;;
+            minimax/b) anchor_time="03:40:00" ;;
+            *) echo "Unknown target '$provider/$slot'"; exit 1 ;;
           esac
-          echo "Serving slot $slot (anchor UTC $anchor_time)"
+          echo "Serving $provider slot $slot (anchor UTC $anchor_time)"
           now=$(date -u +%s)
           today=$(date -u +%Y-%m-%d)
           target=$(date -u -d "$today $anchor_time" +%s)
@@ -95,7 +103,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .anchor-marker
-          key: anchor-${{ matrix.provider }}-${{ steps.wait.outputs.slot }}-${{ steps.wait.outputs.anchor_date }}
+          key: anchor-${{ inputs.provider }}-${{ steps.wait.outputs.slot }}-${{ steps.wait.outputs.anchor_date }}
           lookup-only: true
 
       - uses: actions/setup-node@v5
@@ -117,7 +125,7 @@ jobs:
       # Slot b: GLM only makes a minimal model call — the quota window must
       # be consumed to open window B, but no second email is needed.
       - name: compose-mail
-        if: matrix.provider == 'glm' && steps.wait.outputs.slot == 'a' && steps.marker.outputs.cache-hit != 'true'
+        if: inputs.provider == 'glm' && steps.wait.outputs.slot == 'a' && steps.marker.outputs.cache-hit != 'true'
         env:
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
@@ -131,7 +139,7 @@ jobs:
           echo "bytes:"; wc -c < email-body.html
 
       - name: anchor-ping-glm
-        if: matrix.provider == 'glm' && steps.wait.outputs.slot == 'b' && steps.marker.outputs.cache-hit != 'true'
+        if: inputs.provider == 'glm' && steps.wait.outputs.slot == 'b' && steps.marker.outputs.cache-hit != 'true'
         env:
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
@@ -145,7 +153,7 @@ jobs:
           echo "GLM slot b anchor call done at $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
 
       - name: anchor-ping-minimax
-        if: matrix.provider == 'minimax' && steps.marker.outputs.cache-hit != 'true'
+        if: inputs.provider == 'minimax' && steps.marker.outputs.cache-hit != 'true'
         env:
           # M Plan (platform.minimax.cn subscription): https://api.minimax.cn/anthropic
           # International (platform.minimax.io):        https://api.minimax.io/anthropic
@@ -169,6 +177,7 @@ jobs:
           mkdir -p .anchor-marker
           {
             echo "anchored_at=$(date -u +%FT%TZ)"
+            echo "provider=${{ inputs.provider }}"
             echo "slot=${{ steps.wait.outputs.slot }}"
             echo "anchor_date=${{ steps.wait.outputs.anchor_date }}"
           } > .anchor-marker/marker
@@ -179,10 +188,10 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .anchor-marker
-          key: anchor-${{ matrix.provider }}-${{ steps.wait.outputs.slot }}-${{ steps.wait.outputs.anchor_date }}
+          key: anchor-${{ inputs.provider }}-${{ steps.wait.outputs.slot }}-${{ steps.wait.outputs.anchor_date }}
 
       - name: send-mail
-        if: matrix.provider == 'glm' && steps.wait.outputs.slot == 'a' && steps.marker.outputs.cache-hit != 'true'
+        if: inputs.provider == 'glm' && steps.wait.outputs.slot == 'a' && steps.marker.outputs.cache-hit != 'true'
         uses: dawidd6/action-send-mail@v18
         with:
           server_address: smtp.163.com

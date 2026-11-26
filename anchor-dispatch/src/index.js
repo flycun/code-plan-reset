@@ -1,21 +1,29 @@
 // Cloudflare Worker: precise daily trigger for the GLM/MiniMax anchor workflow.
 //
-// Why: GitHub Actions `schedule` is best-effort and can lag hours at the top
-// of the hour (observed 3.5-6.7h daily). A workflow_dispatch fired by this
-// Worker starts within seconds, and the workflow's own wait-until-anchor step
-// holds until the exact anchor instant before making the anchor call.
+// Why: GitHub Actions `schedule` is best-effort and can lag hours (observed
+// 4-8h daily in Nov 2026), so it was removed as a trigger. This Worker fires
+// a workflow_dispatch within seconds of the schedule, and the workflow's own
+// wait-until-anchor step holds until the exact anchor instant.
 //
-// Two anchor slots per day (both are Beijing-time "reset points"):
-//   slot a -> UTC 22:00 = Beijing 06:00  (window A opens, resets 11:00)
-//   slot b -> UTC 03:10 = Beijing 11:10  (window B opens, resets 16:10)
-// The Worker fires 30 min before each slot and passes `slot` as an input, so
-// the workflow knows which anchor it is serving without guessing from the
-// clock. The slot id is part of the cache-marker key, so a late trigger for
-// slot a can never be mistaken for slot b.
+// Two providers, two anchor slots each, staggered by 30 min so their 5h
+// windows never expire at the same time (and so MiniMax covers GLM's
+// 14:00-18:00 peak-hour window, where GLM costs 2x credits):
+//
+//   provider  slot  cron (UTC)   anchor (UTC)  anchor (Beijing)  window
+//   glm       a     30 21 * * *  22:00         06:00             06:00-11:00
+//   minimax   a     00 22 * * *  22:30         06:30             06:30-11:30
+//   glm       b     40 02 * * *  03:10         11:10             11:10-16:10
+//   minimax   b     10 03 * * *  03:40         11:40             11:40-16:40
+//
+// The cron fires 30 min before each anchor. The provider and slot are passed
+// as workflow_dispatch inputs, so the workflow never has to guess which
+// anchor it is serving. The slot is part of the cache-marker key, so a late
+// trigger for one slot can never be mistaken for another.
 //
 // One-time setup:
 //   1. Create a fine-grained PAT (github.com/settings/personal-access-tokens/new)
 //      scoped to this repo only, permission "Actions: Read and write".
+//      Set a long expiry (90 days+) - an expired PAT silently breaks the anchor.
 //   2. npx wrangler login
 //   3. npx wrangler secret put GH_PAT
 //   4. npx wrangler deploy
@@ -26,31 +34,47 @@ const REPO = "flycun/code-plan-reset";
 const WORKFLOW_ID = "glm-anchor.yml";
 const REF = "main";
 
-// Anchor slot -> UTC hour of that slot. The Worker cron fires 30 min before,
-// so the current UTC hour identifies the slot unambiguously:
-//   21:xx -> slot a (anchors at 22:00 UTC)
-//   02:xx -> slot b (anchors at 03:10 UTC)
-function slotForHour(utcHour) {
-  if (utcHour === 22 || utcHour === 21) return "a";
-  if (utcHour === 3 || utcHour === 2) return "b";
-  // Fallback: pick the slot whose anchor instant is still ahead of us.
+// UTC hour of each cron trigger -> which provider/slot it serves.
+// The cron always fires 30 min before its anchor instant, so the hour is
+// enough to identify the target unambiguously.
+const TRIGGER_MAP = {
+  21: { provider: "glm", slot: "a" }, // 21:30 UTC -> glm slot a (anchor 22:00)
+  22: { provider: "minimax", slot: "a" }, // 22:00 UTC -> minimax slot a (anchor 22:30)
+  2: { provider: "glm", slot: "b" }, // 02:40 UTC -> glm slot b (anchor 03:10)
+  3: { provider: "minimax", slot: "b" }, // 03:10 UTC -> minimax slot b (anchor 03:40)
+};
+
+function targetFor(utcHour) {
+  if (TRIGGER_MAP[utcHour]) return TRIGGER_MAP[utcHour];
+  // Fallback: pick the anchor instant closest ahead of now.
   const now = new Date();
-  const minutesOfDay = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const anchorA = 22 * 60; // 22:00 UTC
-  const anchorB = 3 * 60 + 10; // 03:10 UTC
-  let aheadB = (anchorB - minutesOfDay + 1440) % 1440;
-  let aheadA = (anchorA - minutesOfDay + 1440) % 1440;
-  return aheadA <= aheadB ? "a" : "b";
+  const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const anchors = [
+    { at: 22 * 60, provider: "glm", slot: "a" },
+    { at: 22 * 60 + 30, provider: "minimax", slot: "a" },
+    { at: 3 * 60 + 10, provider: "glm", slot: "b" },
+    { at: 3 * 60 + 40, provider: "minimax", slot: "b" },
+  ];
+  let best = null;
+  let bestDist = Infinity;
+  for (const a of anchors) {
+    const dist = (a.at - minutes + 1440) % 1440;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = a;
+    }
+  }
+  return { provider: best.provider, slot: best.slot };
 }
 
 export default {
   async scheduled(event, env, ctx) {
-    const slot = slotForHour(new Date().getUTCHours());
-    ctx.waitUntil(dispatchWithRetry(env.GH_PAT, slot));
+    const { provider, slot } = targetFor(new Date().getUTCHours());
+    ctx.waitUntil(dispatchWithRetry(env.GH_PAT, provider, slot));
   },
 };
 
-async function dispatchWithRetry(token, slot, attempts = 3) {
+async function dispatchWithRetry(token, provider, slot, attempts = 3) {
   let lastError;
   for (let i = 1; i <= attempts; i++) {
     try {
@@ -66,14 +90,14 @@ async function dispatchWithRetry(token, slot, attempts = 3) {
           },
           body: JSON.stringify({
             ref: REF,
-            inputs: { slot },
+            inputs: { provider, slot },
           }),
         }
       );
       // GitHub returns 204 No Content on success.
       if (res.status === 204) {
         console.log(
-          `dispatch OK slot=${slot} (attempt ${i}) at ${new Date().toISOString()}`
+          `dispatch OK provider=${provider} slot=${slot} (attempt ${i}) at ${new Date().toISOString()}`
         );
         return;
       }

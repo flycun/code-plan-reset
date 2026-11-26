@@ -4,11 +4,20 @@ workers_dev = false   # 本 Worker 只响应定时事件，关掉多余的 worke
 preview_urls = false   # 同理，关掉 Preview URL
 compatibility_date = "2026-11-01"
 
-# Two anchor slots per day. Both fire 30 min before the anchor instant:
-#   "30 21 * * *" -> slot a, anchors at UTC 22:00 = Beijing 06:00
-#   "40  2 * * *" -> slot b, anchors at UTC 03:10 = Beijing 11:10
-# The workflow sleeps to the exact anchor instant and dedups via a cache
-# marker whose key contains the slot id.
+# Four anchors per day: two providers x two slots, staggered by 30 min so the
+# two 5h windows never expire at the same time (and MiniMax covers GLM's
+# 14:00-18:00 peak-hour window where GLM costs 2x credits).
+#
+#   cron (UTC)   fires -> anchors (UTC)  anchors (Beijing)  window
+#   30 21 * * *  glm      a   22:00        06:00             06:00-11:00
+#   00 22 * * *  minimax  a   22:30        06:30             06:30-11:30
+#   40 02 * * *  glm      b   03:10        11:10             11:10-16:10
+#   10 03 * * *  minimax  b   03:40        11:40             11:40-16:40
+#
+# Each cron fires 30 min before its anchor instant. The provider and slot are
+# passed as workflow_dispatch inputs, so the workflow never guesses which
+# anchor it is serving, and the slot is part of the cache-marker key.
+# NOTE: Cloudflare Free allows 5 cron triggers per account - 4 are in use.
 # Cloudflare cron triggers normally fire within seconds of the schedule.
 [triggers]
-crons = ["30 21 * * *", "40 2 * * *"]
+crons = ["30 21 * * *", "0 22 * * *", "40 2 * * *", "10 3 * * *"]
